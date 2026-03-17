@@ -196,6 +196,7 @@ cmake -S . -B build -G Ninja -DEUI_BUILD_EXAMPLES=ON -DEUI_FETCH_GLFW_FROM_GIT=O
 
 仓库已经新增 GitHub Actions 工作流：[`.github/workflows/release.yml`](.github/workflows/release.yml)。
 只要推送以 `v` 开头的 tag，就会自动在 Windows 和 Linux 上执行 CMake 配置、构建，并通过 `cpack` 产出发布包。
+同一个工作流也支持在 GitHub Actions 页面手动运行，并填写 `release_tag`，适合给已有 release 重新构建并补传资产。
 
 常规发布方式：
 

@@ -196,6 +196,7 @@ cmake -S . -B build -G Ninja -DEUI_BUILD_EXAMPLES=ON -DEUI_FETCH_GLFW_FROM_GIT=O
 
 GitHub Actions now includes an automated release workflow at [`.github/workflows/release.yml`](.github/workflows/release.yml).
 Any pushed tag that starts with `v` triggers a release build on Windows and Linux, then runs CMake packaging through `cpack`.
+The same workflow can also be started manually from the GitHub Actions page by providing a `release_tag`, which is useful when you need to rebuild and re-upload assets for an existing release.
 
 Typical release flow:
 

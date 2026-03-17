@@ -4,13 +4,36 @@ on:
   push:
     tags:
       - "v*"
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "Release tag to create or update, for example v0.1.0"
+        required: true
+        type: string
 
 permissions:
   contents: write
 
+env:
+  RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.ref_name }}
+
 jobs:
+  prepare_release:
+    name: Prepare Release
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Ensure GitHub release exists
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view "$RELEASE_TAG" >/dev/null 2>&1 || \
+          gh release create "$RELEASE_TAG" --target "$GITHUB_SHA" --generate-notes
+
   build:
     name: Build ${{ matrix.name }}
+    needs: prepare_release
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -32,7 +55,7 @@ jobs:
             artifact_glob: "dist/*.tar.gz"
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Install Linux dependencies
         if: runner.os == 'Linux'
@@ -49,7 +72,7 @@ jobs:
           -DEUI_BUILD_EXAMPLES=ON
           -DEUI_FETCH_GLFW_FROM_GIT=ON
           -DGLFW_BUILD_WAYLAND=OFF
-          -DCPACK_PACKAGE_FILE_NAME=EUI-${{ github.ref_name }}-${{ matrix.name }}
+          -DCPACK_PACKAGE_FILE_NAME=EUI-${RELEASE_TAG}-${{ matrix.name }}
 
       - name: Build
         run: cmake --build build --config ${{ matrix.config }}
@@ -57,27 +80,16 @@ jobs:
       - name: Package
         run: cpack --config build/CPackConfig.cmake -C ${{ matrix.config }} -G ${{ matrix.cpack_generator }} -B dist
 
-      - name: Upload packaged artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: package-${{ matrix.name }}
-          path: ${{ matrix.artifact_glob }}
-          if-no-files-found: error
+      - name: Upload package to GitHub release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ARTIFACT_GLOB: ${{ matrix.artifact_glob }}
+        run: |
+          $files = Get-ChildItem -Path $env:ARTIFACT_GLOB
+          if (-not $files) {
+            throw "No packaged artifacts matched: $env:ARTIFACT_GLOB"
+          }
 
-  release:
-    name: Publish Release
-    runs-on: ubuntu-latest
-    needs: build
-
-    steps:
-      - name: Download packaged artifacts
-        uses: actions/download-artifact@v4
-        with:
-          path: release-assets
-          merge-multiple: true
-
-      - name: Publish GitHub release
-        uses: softprops/action-gh-release@v2
-        with:
-          files: release-assets/*
-          generate_release_notes: true
+          $paths = $files | ForEach-Object { $_.FullName }
+          gh release upload $env:RELEASE_TAG $paths --clobber
