@@ -287,6 +287,10 @@ struct UIState {
     float deltaTime = 0.0f;
     float screenW = 800.0f;
     float screenH = 600.0f;
+    float framebufferW = 800.0f;
+    float framebufferH = 600.0f;
+    float dpiScaleX = 1.0f;
+    float dpiScaleY = 1.0f;
 
     std::string textInput;
     bool keys[512] = {false};
@@ -319,7 +323,6 @@ public:
     static void ReleaseCachedSurface(const std::string& key);
     static void InvalidateLayer(RenderLayer layer);
     static void InvalidateAll();
-    static void InvalidateBackdrop();
     static void CaptureBackdrop();
 
     static RectBounds MeasureRectBounds(float x, float y, float w, float h, const RectStyle& style);
@@ -330,6 +333,8 @@ public:
                          const Color& shadowColor = Color(0, 0, 0, 0));
     static RectBounds MeasurePolygonBounds(const std::vector<Point2>& points, float strokeWidth = 0.0f);
     static void DrawPolygon(const std::vector<Point2>& points, const Color& fillColor,
+                            float strokeWidth = 0.0f, const Color& strokeColor = Color(0, 0, 0, 0));
+    static void DrawPolygon(const std::vector<Point2>& points, const Color& fillColor, const RectGradient& gradient,
                             float strokeWidth = 0.0f, const Color& strokeColor = Color(0, 0, 0, 0));
 
     static bool LoadFont(const std::string& fontPath, float fontSize = 24.0f,

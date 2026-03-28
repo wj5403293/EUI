@@ -264,6 +264,11 @@ static GLuint PolygonVBO = 0;
 static GLsizeiptr PolygonVBOCapacity = 0;
 static GLint PolygonProjLoc = -1;
 static GLint PolygonColorLoc = -1;
+static GLint PolygonGradientEnabledLoc = -1;
+static GLint PolygonGradientTopLeftLoc = -1;
+static GLint PolygonGradientTopRightLoc = -1;
+static GLint PolygonGradientBottomLeftLoc = -1;
+static GLint PolygonGradientBottomRightLoc = -1;
 static int ActiveLayerIndex = -1;
 static GLuint CurrentActiveProgram = 0;
 static bool ActiveCustomSurface = false;
@@ -477,8 +482,11 @@ void main() {
 static const char* polygonVShaderStr = R"(
 #version 330 core
 layout(location = 0) in vec2 aPos;
+layout(location = 1) in vec2 aUV;
 uniform mat4 projection;
+out vec2 vUV;
 void main() {
+    vUV = aUV;
     gl_Position = projection * vec4(aPos, 0.0, 1.0);
 }
 )";
@@ -486,9 +494,20 @@ void main() {
 static const char* polygonFShaderStr = R"(
 #version 330 core
 uniform vec4 uColor;
+uniform int uGradientEnabled;
+uniform vec4 uGradientTopLeft;
+uniform vec4 uGradientTopRight;
+uniform vec4 uGradientBottomLeft;
+uniform vec4 uGradientBottomRight;
+in vec2 vUV;
 out vec4 FragColor;
+vec4 fillColorAt(vec2 uv) {
+    vec4 top = mix(uGradientTopLeft, uGradientTopRight, clamp(uv.x, 0.0, 1.0));
+    vec4 bottom = mix(uGradientBottomLeft, uGradientBottomRight, clamp(uv.x, 0.0, 1.0));
+    return mix(top, bottom, clamp(uv.y, 0.0, 1.0));
+}
 void main() {
-    FragColor = uColor;
+    FragColor = (uGradientEnabled == 1) ? fillColorAt(vUV) : uColor;
 }
 )";
 
@@ -807,16 +826,18 @@ static LayerCache& CacheFor(RenderLayer layer) {
 
 static int TargetLayerWidth(RenderLayer layer, const RectFrame& bounds) {
     if (UsesTightLayerSurface(layer)) {
-        return std::max(1, static_cast<int>(std::ceil(std::max(0.0f, bounds.width))));
+        const float scaleX = std::max(State.dpiScaleX, 0.0001f);
+        return std::max(1, static_cast<int>(std::ceil(std::max(0.0f, bounds.width * scaleX))));
     }
-    return std::max(1, static_cast<int>(State.screenW));
+    return std::max(1, static_cast<int>(std::ceil(State.framebufferW)));
 }
 
 static int TargetLayerHeight(RenderLayer layer, const RectFrame& bounds) {
     if (UsesTightLayerSurface(layer)) {
-        return std::max(1, static_cast<int>(std::ceil(std::max(0.0f, bounds.height))));
+        const float scaleY = std::max(State.dpiScaleY, 0.0001f);
+        return std::max(1, static_cast<int>(std::ceil(std::max(0.0f, bounds.height * scaleY))));
     }
-    return std::max(1, static_cast<int>(State.screenH));
+    return std::max(1, static_cast<int>(std::ceil(State.framebufferH)));
 }
 
 static void EnsureLayerCacheStorage(RenderLayer layer, int width, int height) {
@@ -956,16 +977,20 @@ static bool MakeScreenScissorRect(const RectFrame& bounds, GLint& outX, GLint& o
         return false;
     }
 
-    const float x1 = std::clamp(bounds.x, 0.0f, State.screenW);
-    const float y1 = std::clamp(bounds.y, 0.0f, State.screenH);
-    const float x2 = std::clamp(bounds.x + bounds.width, x1, State.screenW);
-    const float y2 = std::clamp(bounds.y + bounds.height, y1, State.screenH);
+    const float scaleX = std::max(State.dpiScaleX, 0.0001f);
+    const float scaleY = std::max(State.dpiScaleY, 0.0001f);
+    const float framebufferW = std::max(State.framebufferW, 1.0f);
+    const float framebufferH = std::max(State.framebufferH, 1.0f);
+    const float x1 = std::clamp(bounds.x * scaleX, 0.0f, framebufferW);
+    const float y1 = std::clamp(bounds.y * scaleY, 0.0f, framebufferH);
+    const float x2 = std::clamp((bounds.x + bounds.width) * scaleX, x1, framebufferW);
+    const float y2 = std::clamp((bounds.y + bounds.height) * scaleY, y1, framebufferH);
     if (x2 <= x1 || y2 <= y1) {
         return false;
     }
 
     outX = static_cast<GLint>(std::floor(x1));
-    outY = static_cast<GLint>(std::floor(State.screenH - y2));
+    outY = static_cast<GLint>(std::floor(framebufferH - y2));
     outW = std::max<GLint>(1, static_cast<GLint>(std::ceil(x2) - std::floor(x1)));
     outH = std::max<GLint>(1, static_cast<GLint>(std::ceil(y2) - std::floor(y1)));
     return true;
@@ -1066,8 +1091,10 @@ static GLuint TextShaderProgram = 0;
 static GLint TextProjLoc = -1;
 static GLint TextColorLoc = -1;
 static GLint TextModeLoc = -1;
-static constexpr int kTextSdfPadding = 8;
-static constexpr unsigned char kTextSdfOnEdgeValue = 180;
+static GLint TextSdfEdgeLoc = -1;
+static GLint TextSdfPixelRangeLoc = -1;
+static constexpr int kTextSdfPadding = 12;
+static constexpr unsigned char kTextSdfOnEdgeValue = 120;
 static constexpr float kTextSdfPixelDistScale =
     static_cast<float>(kTextSdfOnEdgeValue) / static_cast<float>(kTextSdfPadding);
 
@@ -1304,16 +1331,18 @@ out vec4 color;
 uniform sampler2D text;
 uniform vec4 textColor;
 uniform int textMode;
+uniform float sdfEdgeValue;
+uniform float sdfPxRange;
 void main() {
     float sampleValue = texture(text, TexCoords).r;
     float alpha = sampleValue;
     if (textMode == 1) {
-        const float edgeValue = 180.0 / 255.0;
-        const float sdfPxRange = 8.0;
-        vec2 unitRange = vec2(sdfPxRange) / vec2(textureSize(text, 0));
-        vec2 screenTexSize = vec2(1.0) / max(fwidth(TexCoords), vec2(0.000001));
-        float screenPxDistance = (sampleValue - edgeValue) * max(0.5 * dot(unitRange, screenTexSize), 1.0);
-        alpha = clamp(screenPxDistance + 0.5, 0.0, 1.0);
+        float signedDistance = sampleValue - sdfEdgeValue;
+        float valueSpread = max(fwidth(sampleValue), 0.0008);
+        alpha = smoothstep(-valueSpread, valueSpread, signedDistance);
+        if (alpha < 0.01) {
+            discard;
+        }
     }
     color = vec4(textColor.rgb, textColor.a * alpha);
 }
@@ -1375,6 +1404,11 @@ void Renderer::Init() {
     CompositeUVSizeLoc = glGetUniformLocation(CompositeProgram, "uUVSize");
     PolygonProjLoc = glGetUniformLocation(PolygonProgram, "projection");
     PolygonColorLoc = glGetUniformLocation(PolygonProgram, "uColor");
+    PolygonGradientEnabledLoc = glGetUniformLocation(PolygonProgram, "uGradientEnabled");
+    PolygonGradientTopLeftLoc = glGetUniformLocation(PolygonProgram, "uGradientTopLeft");
+    PolygonGradientTopRightLoc = glGetUniformLocation(PolygonProgram, "uGradientTopRight");
+    PolygonGradientBottomLeftLoc = glGetUniformLocation(PolygonProgram, "uGradientBottomLeft");
+    PolygonGradientBottomRightLoc = glGetUniformLocation(PolygonProgram, "uGradientBottomRight");
     glUseProgram(ShaderProgram);
     glUniform1i(Channel0Loc, 0);
     glUseProgram(CachedBlurProgram);
@@ -1410,10 +1444,12 @@ void Renderer::Init() {
     glGenBuffers(1, &PolygonVBO);
     glBindVertexArray(PolygonVAO);
     glBindBuffer(GL_ARRAY_BUFFER, PolygonVBO);
-    PolygonVBOCapacity = sizeof(float) * 2 * 3;
+    PolygonVBOCapacity = sizeof(float) * 4 * 3;
     glBufferData(GL_ARRAY_BUFFER, PolygonVBOCapacity, nullptr, GL_DYNAMIC_DRAW);
-    glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 2 * sizeof(float), (void*)0);
+    glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(float), (void*)0);
     glEnableVertexAttribArray(0);
+    glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(float), (void*)(2 * sizeof(float)));
+    glEnableVertexAttribArray(1);
     glBindBuffer(GL_ARRAY_BUFFER, 0);
     glBindVertexArray(0);
 
@@ -1429,9 +1465,13 @@ void Renderer::Init() {
     TextProjLoc = glGetUniformLocation(TextShaderProgram, "projection");
     TextColorLoc = glGetUniformLocation(TextShaderProgram, "textColor");
     TextModeLoc = glGetUniformLocation(TextShaderProgram, "textMode");
+    TextSdfEdgeLoc = glGetUniformLocation(TextShaderProgram, "sdfEdgeValue");
+    TextSdfPixelRangeLoc = glGetUniformLocation(TextShaderProgram, "sdfPxRange");
     glUseProgram(TextShaderProgram);
     glUniform1i(glGetUniformLocation(TextShaderProgram, "text"), 0);
     glUniform1i(TextModeLoc, 1);
+    glUniform1f(TextSdfEdgeLoc, static_cast<float>(kTextSdfOnEdgeValue) / 255.0f);
+    glUniform1f(TextSdfPixelRangeLoc, static_cast<float>(kTextSdfPadding));
 
     glGenVertexArrays(1, &TextVAO);
     glGenBuffers(1, &TextVBO);
@@ -1587,26 +1627,18 @@ void Renderer::EndLayer() {
     CurrentActiveProgram = 0;
 
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
-    glViewport(0, 0, std::max(1, (int)State.screenW), std::max(1, (int)State.screenH));
+    glViewport(0, 0, std::max(1, (int)State.framebufferW), std::max(1, (int)State.framebufferH));
 }
 
 void Renderer::CompositeLayers(const Color& background) {
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
-    glViewport(0, 0, std::max(1, (int)State.screenW), std::max(1, (int)State.screenH));
+    glViewport(0, 0, std::max(1, (int)State.framebufferW), std::max(1, (int)State.framebufferH));
     glDisable(GL_SCISSOR_TEST);
     glDisable(GL_DEPTH_TEST);
     glClearColor(background.r, background.g, background.b, background.a);
     glClear(GL_COLOR_BUFFER_BIT);
     glEnable(GL_BLEND);
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-    const LayerCache& backdrop = CacheFor(RenderLayer::Backdrop);
-    if (backdrop.ready && backdrop.texture != 0 && backdrop.bounds.width > 0.0f && backdrop.bounds.height > 0.0f) {
-        const float uvX = backdrop.bounds.x / std::max(1.0f, State.screenW);
-        const float uvBottom = 1.0f - ((backdrop.bounds.y + backdrop.bounds.height) / std::max(1.0f, State.screenH));
-        const float uvW = backdrop.bounds.width / std::max(1.0f, State.screenW);
-        const float uvH = backdrop.bounds.height / std::max(1.0f, State.screenH);
-        CompositeTexture(backdrop.texture, backdrop.bounds, uvX, uvBottom, uvW, uvH);
-    }
     CurrentActiveProgram = 0;
 }
 
@@ -1623,8 +1655,10 @@ void Renderer::DrawCachedSurface(const std::string& key, const RectFrame& bounds
     const int previousCustomSurfaceHeight = ActiveCustomSurfaceHeight;
 
     CachedSurface& cache = CachedSurfaces[key];
-    const int targetW = std::max(1, static_cast<int>(std::ceil(bounds.width * CachedSurfaceSupersampleScale)));
-    const int targetH = std::max(1, static_cast<int>(std::ceil(bounds.height * CachedSurfaceSupersampleScale)));
+    const int targetW = std::max(1, static_cast<int>(std::ceil(
+        bounds.width * CachedSurfaceSupersampleScale * std::max(State.dpiScaleX, 0.0001f))));
+    const int targetH = std::max(1, static_cast<int>(std::ceil(
+        bounds.height * CachedSurfaceSupersampleScale * std::max(State.dpiScaleY, 0.0001f))));
     const bool sizeChanged =
         !FloatEq(cache.bounds.width, bounds.width) ||
         !FloatEq(cache.bounds.height, bounds.height);
@@ -1664,7 +1698,7 @@ void Renderer::DrawCachedSurface(const std::string& key, const RectFrame& bounds
                        std::max(1, LayerCaches[previousLayerIndex].height));
         } else {
             glBindFramebuffer(GL_FRAMEBUFFER, 0);
-            glViewport(0, 0, std::max(1, (int)State.screenW), std::max(1, (int)State.screenH));
+            glViewport(0, 0, std::max(1, (int)State.framebufferW), std::max(1, (int)State.framebufferH));
         }
         BeginFrame();
     }
@@ -1709,7 +1743,7 @@ void Renderer::BeginFrame() {
     glUseProgram(ShaderProgram);
     glUniformMatrix4fv(ProjLoc, 1, GL_FALSE, proj);
     glUniform1f(TimeLoc, static_cast<float>(glfwGetTime()));
-    glUniform2f(ResolutionLoc, State.screenW, State.screenH);
+    glUniform2f(ResolutionLoc, State.framebufferW, State.framebufferH);
 
     glUseProgram(CachedBlurProgram);
     glUniformMatrix4fv(CachedBlurProjLoc, 1, GL_FALSE, proj);
@@ -1806,25 +1840,29 @@ void Renderer::DrawRect(float x, float y, float w, float h, const RectStyle& sty
     glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
 
     if (canReuseBlurCache) {
-        int copyX = std::clamp((int)std::floor(bounds.x), 0, (int)State.screenW);
-        int copyYTop = std::clamp((int)std::floor(bounds.y), 0, (int)State.screenH);
-        int copyRight = std::clamp((int)std::ceil(bounds.x + bounds.w), 0, (int)State.screenW);
-        int copyBottom = std::clamp((int)std::ceil(bounds.y + bounds.h), 0, (int)State.screenH);
+        const float scaleX = std::max(State.dpiScaleX, 0.0001f);
+        const float scaleY = std::max(State.dpiScaleY, 0.0001f);
+        const int framebufferW = std::max(1, (int)State.framebufferW);
+        const int framebufferH = std::max(1, (int)State.framebufferH);
+        int copyX = std::clamp((int)std::floor(bounds.x * scaleX), 0, framebufferW);
+        int copyYTop = std::clamp((int)std::floor(bounds.y * scaleY), 0, framebufferH);
+        int copyRight = std::clamp((int)std::ceil((bounds.x + bounds.w) * scaleX), 0, framebufferW);
+        int copyBottom = std::clamp((int)std::ceil((bounds.y + bounds.h) * scaleY), 0, framebufferH);
         int copyW = copyRight - copyX;
         int copyH = copyBottom - copyYTop;
 
         if (copyW > 0 && copyH > 0) {
-            int copyY = std::max(0, (int)std::floor(State.screenH - (copyYTop + copyH)));
+            int copyY = std::max(0, (int)std::floor(State.framebufferH - (copyYTop + copyH)));
 
             EnsureCachedBlurTexture(copyW, copyH);
             glBindTexture(GL_TEXTURE_2D, CachedBlurTexture);
             glCopyTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, copyX, copyY, copyW, copyH);
 
             CachedBackdropVersion = BackdropVersion;
-            CachedBlurX = (float)copyX;
-            CachedBlurY = (float)copyYTop;
-            CachedBlurW = (float)copyW;
-            CachedBlurH = (float)copyH;
+            CachedBlurX = static_cast<float>(copyX) / scaleX;
+            CachedBlurY = static_cast<float>(copyYTop) / scaleY;
+            CachedBlurW = static_cast<float>(copyW) / scaleX;
+            CachedBlurH = static_cast<float>(copyH) / scaleY;
             CachedBlurColor[0] = style.color.r;
             CachedBlurColor[1] = style.color.g;
             CachedBlurColor[2] = style.color.b;
@@ -1865,6 +1903,11 @@ RectBounds Renderer::MeasurePolygonBounds(const std::vector<Point2>& points, flo
 
 void Renderer::DrawPolygon(const std::vector<Point2>& points, const Color& fillColor,
                            float strokeWidth, const Color& strokeColor) {
+    DrawPolygon(points, fillColor, RectGradient{}, strokeWidth, strokeColor);
+}
+
+void Renderer::DrawPolygon(const std::vector<Point2>& points, const Color& fillColor, const RectGradient& gradient,
+                           float strokeWidth, const Color& strokeColor) {
     if (points.size() < 3) {
         return;
     }
@@ -1874,11 +1917,16 @@ void Renderer::DrawPolygon(const std::vector<Point2>& points, const Color& fillC
         return;
     }
 
+    RectBounds fillBounds = ComputePolygonBounds(points, 0.0f);
+    const float invW = fillBounds.w > 0.0001f ? (1.0f / fillBounds.w) : 0.0f;
+    const float invH = fillBounds.h > 0.0001f ? (1.0f / fillBounds.h) : 0.0f;
     std::vector<float> triangleVertices;
-    triangleVertices.reserve(triangles.size() * 2);
+    triangleVertices.reserve(triangles.size() * 4);
     for (const Point2& point : triangles) {
         triangleVertices.push_back(point.x);
         triangleVertices.push_back(point.y);
+        triangleVertices.push_back((point.x - fillBounds.x) * invW);
+        triangleVertices.push_back((point.y - fillBounds.y) * invH);
     }
 
     if (CurrentActiveProgram != PolygonProgram) {
@@ -1889,6 +1937,11 @@ void Renderer::DrawPolygon(const std::vector<Point2>& points, const Color& fillC
     glEnable(GL_BLEND);
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
     glUniform4f(PolygonColorLoc, fillColor.r, fillColor.g, fillColor.b, fillColor.a);
+    glUniform1i(PolygonGradientEnabledLoc, gradient.enabled ? 1 : 0);
+    glUniform4f(PolygonGradientTopLeftLoc, gradient.topLeft.r, gradient.topLeft.g, gradient.topLeft.b, gradient.topLeft.a);
+    glUniform4f(PolygonGradientTopRightLoc, gradient.topRight.r, gradient.topRight.g, gradient.topRight.b, gradient.topRight.a);
+    glUniform4f(PolygonGradientBottomLeftLoc, gradient.bottomLeft.r, gradient.bottomLeft.g, gradient.bottomLeft.b, gradient.bottomLeft.a);
+    glUniform4f(PolygonGradientBottomRightLoc, gradient.bottomRight.r, gradient.bottomRight.g, gradient.bottomRight.b, gradient.bottomRight.a);
     glBindVertexArray(PolygonVAO);
     glBindBuffer(GL_ARRAY_BUFFER, PolygonVBO);
     const GLsizeiptr triangleBytes = static_cast<GLsizeiptr>(sizeof(float) * triangleVertices.size());
@@ -1901,13 +1954,16 @@ void Renderer::DrawPolygon(const std::vector<Point2>& points, const Color& fillC
 
     if (strokeWidth > 0.0f && strokeColor.a > 0.0f) {
         std::vector<float> outlineVertices;
-        outlineVertices.reserve(points.size() * 2);
+        outlineVertices.reserve(points.size() * 4);
         for (const Point2& point : points) {
             outlineVertices.push_back(point.x);
             outlineVertices.push_back(point.y);
+            outlineVertices.push_back(0.0f);
+            outlineVertices.push_back(0.0f);
         }
 
         glUniform4f(PolygonColorLoc, strokeColor.r, strokeColor.g, strokeColor.b, strokeColor.a);
+        glUniform1i(PolygonGradientEnabledLoc, 0);
         const GLsizeiptr outlineBytes = static_cast<GLsizeiptr>(sizeof(float) * outlineVertices.size());
         if (outlineBytes > PolygonVBOCapacity) {
             PolygonVBOCapacity = outlineBytes;
@@ -2162,17 +2218,13 @@ void Renderer::InvalidateAll() {
     State.needsRepaint = true;
 }
 
-void Renderer::InvalidateBackdrop() {
-    InvalidateLayer(RenderLayer::Backdrop);
-}
-
 void Renderer::CaptureBackdrop() {
     if (!BackdropCapturePending) {
         return;
     }
 
-    const int texW = std::max(1, (int)State.screenW);
-    const int texH = std::max(1, (int)State.screenH);
+    const int texW = std::max(1, (int)State.framebufferW);
+    const int texH = std::max(1, (int)State.framebufferH);
     EnsureBackdropTexture(texW, texH);
     glBindTexture(GL_TEXTURE_2D, BgTexture);
     glCopyTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, 0, 0, texW, texH);

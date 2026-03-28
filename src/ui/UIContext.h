@@ -67,11 +67,12 @@ public:
     void begin(const std::string& pageId);
     void end();
     void update();
+    void render();
     void draw();
-    void draw(RenderLayer layer);
-    RectFrame layerBounds(RenderLayer layer) const;
     bool wantsContinuousUpdate() const;
     void markAllNodesDirty();
+    void requestVisualRefresh(float duration = 0.0f);
+    void requestThemeRefresh(float duration = 0.18f);
     void pushClip(float x, float y, float width, float height);
     void popClip();
     float pushScrollArea(const std::string& id, float x, float y, float width, float height,
@@ -171,7 +172,7 @@ private:
             UINode* raw = replacement.get();
             it = nodes_.insert_or_assign(fullKey, std::move(replacement)).first;
             raw->beginCompose(composeStamp_);
-            applyCurrentContext(raw->primitive());
+            applyCurrentContext(raw);
             order_.push_back(raw);
             return static_cast<NodeT&>(*raw);
         }
@@ -181,13 +182,19 @@ private:
             node->beginCompose(composeStamp_);
             order_.push_back(node);
         }
-        applyCurrentContext(node->primitive());
+        applyCurrentContext(node);
         return static_cast<NodeT&>(*node);
     }
 
-    void applyCurrentContext(UIPrimitive& primitive) {
+    void applyCurrentContext(UINode* node) {
+        if (node == nullptr) {
+            return;
+        }
+        UIPrimitive& primitive = node->primitive();
         primitive.contextOffsetX = currentOffsetX_;
         primitive.contextOffsetY = currentOffsetY_;
+        baseContextOffset_[node] = Offset{currentOffsetX_, currentOffsetY_};
+        scrollBindings_[node] = scrollScopeStack_;
         if (clipStack_.empty() || !primitive.clipToParent) {
             primitive.hasClipRect = false;
             primitive.clipRect = UIClipRect{};
@@ -211,6 +218,7 @@ private:
         currentOffsetY_ -= offsetStack_.back().y;
         offsetStack_.pop_back();
     }
+    void applyRuntimeContext(UINode* node);
 
     LayoutState* createLayout(FlexDirection direction);
     void beginLayout(LayoutState* layout);
@@ -225,7 +233,6 @@ private:
     RectFrame resolveItemFrame(const LayoutItem& item, FlexDirection direction,
                               float cursor, float crossStart, float mainSize, float crossSize) const;
     void applyResolvedFrame(UINode& node, const RectFrame& frame);
-    void refreshLayerBounds();
 
     friend void FinalizeUIBuild(UIContext& context, UINode& node, const LayoutBuildInfo& info);
 
@@ -236,13 +243,14 @@ private:
     std::vector<UINode*> drawOrder_;
     std::vector<UIClipRect> clipStack_;
     std::vector<Offset> offsetStack_;
+    std::vector<ScrollAreaNode*> scrollScopeStack_;
     std::vector<std::unique_ptr<LayoutState>> ownedLayouts_;
     std::vector<LayoutState*> layoutStack_;
-    mutable std::vector<RectFrame> layerBounds_;
+    std::unordered_map<UINode*, Offset> baseContextOffset_;
+    std::unordered_map<UINode*, std::vector<ScrollAreaNode*>> scrollBindings_;
     bool treeChanged_ = false;
     bool needsRecompose_ = false;
     std::uint64_t drawOrderStamp_ = 0;
-    std::uint64_t layerBoundsStamp_ = 0;
     float currentOffsetX_ = 0.0f;
     float currentOffsetY_ = 0.0f;
 };
