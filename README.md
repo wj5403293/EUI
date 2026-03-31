@@ -52,7 +52,6 @@ int main() {
     });
 }
 ```
-
 ## 详细文档
 
 更多细节参考 `docs/guide`：
@@ -64,3 +63,11 @@ int main() {
 - [docs/guide/layout-and-anchor.md](./docs/guide/layout-and-anchor.md)
 - [docs/guide/components-and-custom-node.md](./docs/guide/components-and-custom-node.md)
 - [docs/guide/runtime-network-fonts.md](./docs/guide/runtime-network-fonts.md)
+
+## ⭐ Stats
+
+![Stars](https://img.shields.io/github/stars/用户名/仓库?style=for-the-badge)
+
+## 📈 Star History
+
+[![Star History](https://api.star-history.com/svg?repos=sudoevolve/EUI&type=Date)](https://star-history.com/sudoevolve/EUI&Date)
